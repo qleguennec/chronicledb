@@ -5,11 +5,10 @@ pub type TMPID = Uuid;
 pub type DBID = Uuid;
 pub type TX = u64;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum Value {
     String(String),
     Integer(i64),
-    Float(f64),
     Boolean(bool),
     EntityRef(ID),
 }
@@ -20,7 +19,7 @@ pub enum Attribute {
     String(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Hash, Eq)]
 pub enum ID {
     DBID(DBID),
     TMPID(TMPID),

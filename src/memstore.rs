@@ -12,19 +12,12 @@ struct MemStore {
     datoms: Vec<Datom>,
     next_tx: u64,
     eavt: HashMap<DBID, HashMap<Attribute, (Value, TX)>>,
+    avet: HashMap<Attribute, HashMap<Value, (DBID, TX)>>,
 }
+
 impl Store for MemStore {
     fn new() -> Self {
         MemStore::default()
-    }
-
-    fn rebuild_eavt(&mut self, new_datoms: &Vec<Datom>) {
-        for datom in new_datoms {
-            let attribute = datom.attribute.clone();
-            let value = datom.value.clone();
-            let attr_map = self.eavt.entry(datom.id).or_insert_with(HashMap::new);
-            attr_map.insert(attribute, (value, datom.tx));
-        }
     }
 
     fn transact(&mut self, transaction: Transaction) {
@@ -46,8 +39,35 @@ impl Store for MemStore {
             .collect();
 
         self.rebuild_eavt(&new_datoms);
+        self.rebuild_avet(&new_datoms);
         self.datoms.append(&mut new_datoms);
         self.next_tx += 1;
+    }
+
+    fn query_datoms(&self, query: &Query) -> Vec<&Datom> {
+        self.datoms
+            .iter()
+            .filter(|d| query.conjunction.iter().all(|clause| clause.match_datom(d)))
+            .collect()
+    }
+
+    fn rebuild_eavt(&mut self, new_datoms: &Vec<Datom>) {
+        for datom in new_datoms {
+            let attribute = datom.attribute.clone();
+            let value = datom.value.clone();
+            let attr_map = self.eavt.entry(datom.id).or_insert_with(HashMap::new);
+            attr_map.insert(attribute, (value, datom.tx));
+        }
+    }
+
+    fn rebuild_avet(&mut self, new_datoms: &Vec<Datom>) {
+        for datom in new_datoms {
+            let attribute = datom.attribute.clone();
+            let value = datom.value.clone();
+            let vmap: &mut HashMap<Value, (DBID, TX)> =
+                self.avet.entry(attribute).or_insert_with(HashMap::new);
+            vmap.insert(value, (datom.id, datom.tx));
+        }
     }
 
     fn resolve_objects(&self, datoms: Vec<&Datom>) -> Vec<Object> {
@@ -68,13 +88,6 @@ impl Store for MemStore {
                 })
             })
             .filter_map(std::convert::identity)
-            .collect()
-    }
-
-    fn query_datoms(&self, query: &Query) -> Vec<&Datom> {
-        self.datoms
-            .iter()
-            .filter(|d| query.conjunction.iter().all(|clause| clause.match_datom(d)))
             .collect()
     }
 }
@@ -350,5 +363,195 @@ mod tests {
 
         let results = store.query_datoms(&query);
         assert_eq!(results.len(), 1, "Empty query should return all datoms");
+    }
+}
+
+#[cfg(test)]
+mod avet_tests {
+    use super::*;
+    use crate::query::WhereClause;
+    use uuid::Uuid;
+
+    fn create_datom(id: DBID, attribute: &str, value: Value, tx: TX) -> Datom {
+        Datom {
+            id,
+            attribute: Attribute::String(attribute.to_string()),
+            value,
+            tx,
+        }
+    }
+
+    fn create_transaction(id: ID, av_pairs: Vec<AV>) -> Transaction {
+        Transaction {
+            elems: vec![Object { id, a_v: av_pairs }],
+        }
+    }
+
+    // Helper to create AV pair
+    fn create_av(attribute: &str, value: Value) -> AV {
+        AV {
+            attribute: Attribute::String(attribute.to_string()),
+            value,
+        }
+    }
+
+    #[test]
+    fn test_rebuild_avet_single_datom() {
+        let mut store = MemStore::new();
+        let id = Uuid::new_v4();
+        let datoms = vec![create_datom(
+            id,
+            "name",
+            Value::String("Alice".to_string()),
+            1,
+        )];
+        store.rebuild_avet(&datoms);
+
+        let attr_map = store
+            .avet
+            .get(&Attribute::String("name".to_string()))
+            .expect("Attribute should exist in AVET");
+        let (e, tx) = attr_map
+            .get(&Value::String("Alice".to_string()))
+            .expect("Value should exist");
+        assert_eq!(*e, id);
+        assert_eq!(*tx, 1);
+    }
+
+    #[test]
+    fn test_rebuild_avet_multiple_datoms_same_attribute() {
+        let mut store = MemStore::new();
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let datoms = vec![
+            create_datom(id1, "name", Value::String("Alice".to_string()), 1),
+            create_datom(id2, "name", Value::String("Bob".to_string()), 1),
+        ];
+        store.rebuild_avet(&datoms);
+
+        let attr_map = store
+            .avet
+            .get(&Attribute::String("name".to_string()))
+            .expect("Attribute should exist in AVET");
+        assert_eq!(attr_map.len(), 2, "Should have two values");
+        assert_eq!(
+            attr_map.get(&Value::String("Alice".to_string())),
+            Some(&(id1, 1))
+        );
+        assert_eq!(
+            attr_map.get(&Value::String("Bob".to_string())),
+            Some(&(id2, 1))
+        );
+    }
+
+    #[test]
+    fn test_rebuild_avet_multiple_attributes() {
+        let mut store = MemStore::new();
+        let id = Uuid::new_v4();
+        let datoms = vec![
+            create_datom(id, "name", Value::String("Alice".to_string()), 1),
+            create_datom(id, "age", Value::Integer(30), 1),
+        ];
+        store.rebuild_avet(&datoms);
+
+        assert_eq!(store.avet.len(), 2, "Should have two attributes");
+        let name_map = store
+            .avet
+            .get(&Attribute::String("name".to_string()))
+            .expect("Name attribute should exist");
+        let age_map = store
+            .avet
+            .get(&Attribute::String("age".to_string()))
+            .expect("Age attribute should exist");
+        assert_eq!(
+            name_map.get(&Value::String("Alice".to_string())),
+            Some(&(id, 1))
+        );
+        assert_eq!(age_map.get(&Value::Integer(30)), Some(&(id, 1)));
+    }
+
+    #[test]
+    fn test_transact_updates_avet() {
+        let mut store = MemStore::new();
+        let id = Uuid::new_v4();
+        let transaction = create_transaction(
+            ID::DBID(id),
+            vec![
+                create_av("name", Value::String("Alice".to_string())),
+                create_av("age", Value::Integer(30)),
+            ],
+        );
+
+        store.transact(transaction);
+
+        assert_eq!(store.avet.len(), 2, "AVET should have two attributes");
+        let name_map = store
+            .avet
+            .get(&Attribute::String("name".to_string()))
+            .expect("Name attribute should exist");
+        let age_map = store
+            .avet
+            .get(&Attribute::String("age".to_string()))
+            .expect("Age attribute should exist");
+        assert_eq!(
+            name_map.get(&Value::String("Alice".to_string())),
+            Some(&(id, 0)),
+            "AVET should map name value to entity"
+        );
+        assert_eq!(
+            age_map.get(&Value::Integer(30)),
+            Some(&(id, 0)),
+            "AVET should map age value to entity"
+        );
+    }
+
+    #[test]
+    fn test_avet_empty_transaction() {
+        let mut store = MemStore::new();
+        let transaction = Transaction { elems: vec![] };
+        store.transact(transaction);
+
+        assert!(store.avet.is_empty(), "AVET should remain empty");
+    }
+
+    #[test]
+    fn test_query_using_avet() {
+        let mut store = MemStore::new();
+        let id = Uuid::new_v4();
+        let datom = create_datom(id, "name", Value::String("Alice".to_string()), 1);
+        store.datoms.push(datom.clone());
+        store.rebuild_avet(&vec![datom]);
+
+        let query = Query {
+            conjunction: vec![WhereClause {
+                attribute: Attribute::String("name".to_string()),
+                value: Some(Value::String("Alice".to_string())),
+            }],
+        };
+
+        let results = store.query_datoms(&query);
+        assert_eq!(results.len(), 1, "Should find one matching datom via AVET");
+        assert_eq!(results[0].id, id);
+        assert_eq!(results[0].value, Value::String("Alice".to_string()));
+    }
+
+    #[test]
+    fn test_avet_no_match() {
+        let mut store = MemStore::new();
+        let id = Uuid::new_v4();
+        let datom = create_datom(id, "name", Value::String("Alice".to_string()), 1);
+
+        store.datoms.push(datom.clone());
+        store.rebuild_avet(&vec![datom]);
+
+        let query = Query {
+            conjunction: vec![WhereClause {
+                attribute: Attribute::String("name".to_string()),
+                value: Some(Value::String("Bob".to_string())),
+            }],
+        };
+
+        let results = store.query_datoms(&query);
+        assert!(results.is_empty(), "Should find no matching datoms");
     }
 }

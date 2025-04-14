@@ -6,5 +6,6 @@ pub trait Store {
     fn transact(&mut self, transaction: Transaction);
     fn query_datoms(&self, query: &Query) -> Vec<&Datom>;
     fn rebuild_eavt(&mut self, new_datoms: &Vec<Datom>);
+    fn rebuild_avet(&mut self, new_datoms: &Vec<Datom>);
     fn resolve_objects(&self, datoms: Vec<&Datom>) -> Vec<Object>;
 }
